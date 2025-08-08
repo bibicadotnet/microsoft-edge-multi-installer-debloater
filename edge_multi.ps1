@@ -9,10 +9,20 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit
 }
 
+Clear-Host
+Write-Host " Microsoft Edge Browser Multi Installer " -BackgroundColor DarkGreen
+
 # Kill processes
 @("msedge", "MicrosoftEdgeUpdate", "edgeupdate", "edgeupdatem", "MicrosoftEdgeSetup") | ForEach-Object {
     Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
+
+# Create main temp directory
+$tempDir = "$env:USERPROFILE\Downloads\microsoft-edge-multi-installer-debloater"
+if (Test-Path $tempDir) {
+    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
 # Define download URLs and channels
 $edgeChannels = @{
@@ -39,6 +49,12 @@ $shortcutNames = @{
     "3" = "Microsoft Edge Dev"
     "4" = "Microsoft Edge Canary"
 }
+$userDataPaths = @{
+    "1" = "Microsoft\Edge"
+    "2" = "Microsoft\Edge Beta"
+    "3" = "Microsoft\Edge Dev"
+    "4" = "Microsoft\Edge Canary"
+}
 $iconUrls = @{
     "1" = "https://github.com/bibicadotnet/microsoft-edge-multi-installer-debloater/raw/refs/heads/main/icon/Edge.ico"
     "2" = "https://github.com/bibicadotnet/microsoft-edge-multi-installer-debloater/raw/refs/heads/main/icon/Edge%20Beta.ico"
@@ -51,40 +67,36 @@ $headers = @{
     "User-Agent" = "Microsoft Edge Update/1.3.183.29;winhttp"
 }
 
-Clear-Host
-Write-Host " Microsoft Edge Browser Multi Installer " -BackgroundColor DarkGreen
-
 # Prompt for channel selection
-Write-Host "`nFetching latest versions for all channels..."
-$channelVersions = @{}
+#Write-Host "Fetching latest versions for all channels..."
 
-# Get version for each channel
-foreach ($channelKey in $edgeChannels.Keys) {
-    $channelAppId = $edgeChannels[$channelKey]
-    $channelDisplayName = $channelNames[$channelKey]
-    
-    try {
-        $versionBody = @{
-            "targetingAttributes" = @{
-                "IsInternalUser" = $true
-                "Updater" = "MicrosoftEdgeUpdate"
-                "UpdaterVersion" = "1.3.183.29"
-            }
-        } | ConvertTo-Json -Depth 3
-        
-        $versionUrl = [string]::Format($checkVersionUrl, $channelAppId)
-        $versionResponse = Invoke-RestMethod -Method Post -Uri $versionUrl -Headers $headers -Body $versionBody -ContentType "application/json"
-        $channelVersion = $versionResponse.ContentId.Version
-        $channelVersions[$channelKey] = $channelVersion
-        
-    } catch {
-        $channelVersions[$channelKey] = "Error"
-        Write-Host "[WARNING] Could not fetch version for $channelDisplayName"
-    }
+# Fetch all Edge release data once
+$allReleases = irm "https://edgeupdates.microsoft.com/api/products"
+
+# Lấy phiên bản cho từng channel
+$channelVersions = @{
+    "1" = ($allReleases | Where-Object { $_.Product -eq "Stable"    }).Releases |
+           Where-Object { $_.Platform -eq "Windows" -and $_.Architecture -eq "x64" } |
+           Sort-Object PublishedTime -Descending |
+           Select-Object -First 1 -ExpandProperty ProductVersion
+
+    "2" = ($allReleases | Where-Object { $_.Product -eq "Beta"      }).Releases |
+           Where-Object { $_.Platform -eq "Windows" -and $_.Architecture -eq "x64" } |
+           Sort-Object PublishedTime -Descending |
+           Select-Object -First 1 -ExpandProperty ProductVersion
+
+    "3" = ($allReleases | Where-Object { $_.Product -eq "Dev"       }).Releases |
+           Where-Object { $_.Platform -eq "Windows" -and $_.Architecture -eq "x64" } |
+           Sort-Object PublishedTime -Descending |
+           Select-Object -First 1 -ExpandProperty ProductVersion
+
+    "4" = ($allReleases | Where-Object { $_.Product -eq "Canary"    }).Releases |
+           Where-Object { $_.Platform -eq "Windows" -and $_.Architecture -eq "x64" } |
+           Sort-Object PublishedTime -Descending |
+           Select-Object -First 1 -ExpandProperty ProductVersion
 }
 
-Write-Host ""
-Write-Host "Select Edge channel to install:"
+Write-Host "`nSelect Edge channel to install:"
 Write-Host "1. Stable ($($channelVersions['1']))"
 Write-Host "2. Beta ($($channelVersions['2']))"
 Write-Host "3. Developer ($($channelVersions['3']))"
@@ -96,12 +108,14 @@ if (![string]::IsNullOrWhiteSpace($selection) -and $edgeChannels.ContainsKey($se
     $channelName = $channelNames[$selection]
     $channelPath = $channelPaths[$selection]
     $shortcutName = $shortcutNames[$selection]
+    $userDataPath = $userDataPaths[$selection]
     $iconUrl = $iconUrls[$selection]
 } else {
     $appId = $edgeChannels["1"]
     $channelName = $channelNames["1"]
     $channelPath = $channelPaths["1"]
     $shortcutName = $shortcutNames["1"]
+    $userDataPath = $userDataPaths["1"]
     $iconUrl = $iconUrls["1"]
 }
 
@@ -143,25 +157,32 @@ Write-Host "  File: $originalFileName"
 Write-Host "  Size: ${size} MB"
 Write-Host "  SHA256: $sha256"
 
-# Download with proper filename
-$outputPath = Join-Path $PWD $originalFileName
-Write-Host "[INFO] Downloading $originalFileName..."
+# Download with proper filename to temp directory
+$outputPath = Join-Path $tempDir $originalFileName
+Write-Host "[INFO] Downloading $originalFileName to temp directory..."
 $wc = New-Object System.Net.WebClient
 $wc.DownloadFile($downloadUrl, $outputPath)
 Write-Host "[INFO] Downloaded to: $outputPath"
 
-# Download 7zr.exe if needed
-$sevenZPath = Join-Path $PWD "7zr.exe"
+# Download 7zr.exe to temp directory
+$sevenZPath = Join-Path $tempDir "7zr.exe"
 if (-not (Test-Path $sevenZPath)) {
-    Write-Host "[INFO] Downloading 7zr.exe..."
+    Write-Host "[INFO] Downloading 7zr.exe to temp directory..."
     $wc.DownloadFile("https://www.7-zip.org/a/7zr.exe", $sevenZPath)
 }
 
-# Extract the main .exe file to get MSEDGE.7z
-$tempExtractFolder = Join-Path $PWD "temp_extract"
-if (Test-Path $tempExtractFolder) {
-    Remove-Item $tempExtractFolder -Recurse -Force
+# Create subdirectories in temp for organization
+$tempExtractFolder = Join-Path $tempDir "temp_extract"
+$finalExtractFolder = Join-Path $tempDir "MSEDGE_EXTRACTED"
+$tempAppFolder = Join-Path $tempDir "temp_application"
+
+# Clean up existing subdirectories
+@($tempExtractFolder, $finalExtractFolder, $tempAppFolder) | ForEach-Object {
+    if (Test-Path $_) {
+        Remove-Item $_ -Recurse -Force
+    }
 }
+
 New-Item -ItemType Directory -Path $tempExtractFolder | Out-Null
 
 Write-Host "[INFO] Extracting $originalFileName..."
@@ -173,10 +194,6 @@ if ($msedge7zPath) {
     $fullMsedge7zPath = Join-Path $tempExtractFolder $msedge7zPath
     Write-Host "[INFO] Found MSEDGE.7z, extracting..."
     
-    $finalExtractFolder = Join-Path $PWD "MSEDGE_EXTRACTED"
-    if (Test-Path $finalExtractFolder) {
-        Remove-Item $finalExtractFolder -Recurse -Force
-    }
     New-Item -ItemType Directory -Path $finalExtractFolder | Out-Null
     
     & $sevenZPath x $fullMsedge7zPath "-o$finalExtractFolder" -y | Out-Null
@@ -188,51 +205,30 @@ if ($msedge7zPath) {
     
     if ($chromeBinPath) {
         # Create temporary Application folder structure
-        $tempAppFolder = Join-Path $PWD "temp_application"
-        if (Test-Path $tempAppFolder) {
-            Remove-Item $tempAppFolder -Recurse -Force
-        }
         New-Item -ItemType Directory -Path $tempAppFolder -Force | Out-Null
         
         # Copy version folder to temp Application
         $versionInApp = Join-Path $tempAppFolder $chromeBinPath.Name
         Copy-Item $chromeBinPath.FullName $versionInApp -Recurse -Force
         
-		# Create/copy main Application files
-		$mainFiles = @(
-			"msedge.exe",
-			"msedge_proxy.exe",
-			"pwahelper.exe", 
-			"initial_preferences",
-			"delegatedWebFeatures.sccd"
-		)
-
-		foreach ($file in $mainFiles) {
-			$sourceFile = Get-ChildItem -Path $finalExtractFolder -Name $file -Recurse | Select-Object -First 1
-			if ($sourceFile) {
-				$sourcePath = Join-Path $finalExtractFolder $sourceFile
-				$destPath = Join-Path $tempAppFolder $file
-				Copy-Item $sourcePath $destPath -Force -ErrorAction SilentlyContinue
-			}
-		}
-
-# Create msedge.VisualElementsManifest.xml
-$visualElementsContent = @"
-<Application xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>
-  <VisualElements
-      ShowNameOnSquare150x150Logo='on'
-      Square150x150Logo='$($chromeBinPath.Name)\Edge_Icon.ico'
-      Square70x70Logo='$($chromeBinPath.Name)\Edge_Icon.ico'
-      Square44x44Logo='$($chromeBinPath.Name)\Edge_Icon.ico'
-      ForegroundText='light'
-      BackgroundColor='#173A73'
-      ShortDisplayName='Edge'/>
-</Application>
-"@
-
-		$visualElementsPath = Join-Path $tempAppFolder "msedge.VisualElementsManifest.xml"
-		$visualElementsContent | Out-File -FilePath $visualElementsPath -Encoding UTF8 -Force
-		Write-Host "[INFO] Created VisualElementsManifest.xml"
+        # Create/copy main Application files
+        $mainFiles = @(
+            "msedge.exe",
+            "msedge.VisualElementsManifest.xml", 
+            "msedge_proxy.exe",
+            "pwahelper.exe",
+            "initial_preferences",
+            "delegatedWebFeatures.sccd"
+        )
+        
+        foreach ($file in $mainFiles) {
+            $sourceFile = Get-ChildItem -Path $finalExtractFolder -Name $file -Recurse | Select-Object -First 1
+            if ($sourceFile) {
+                $sourcePath = Join-Path $finalExtractFolder $sourceFile
+                $destPath = Join-Path $tempAppFolder $file
+                Copy-Item $sourcePath $destPath -Force -ErrorAction SilentlyContinue
+            }
+        }
         
         # Create SetupMetrics folder
         $setupMetricsFolder = Join-Path $tempAppFolder "SetupMetrics"
@@ -260,6 +256,13 @@ $visualElementsContent = @"
         
         Write-Host "[INFO] Temporary Application folder ready: $tempAppFolder"
         
+        # Create user data directory for this channel
+        $userDataFullPath = "$env:LOCALAPPDATA\$userDataPath\User Data"
+        Write-Host "[INFO] Creating user data directory: $userDataFullPath"
+        if (-not (Test-Path $userDataFullPath)) {
+            New-Item -ItemType Directory -Path $userDataFullPath -Force | Out-Null
+        }
+        
         # Now copy to system location
         $systemPath = $channelPath
         $systemAppPath = Join-Path $systemPath "Application"
@@ -284,9 +287,9 @@ $visualElementsContent = @"
             Write-Host "[INFO] Installation path: $systemPath"
             Write-Host "[INFO] Executable: $(Join-Path $systemAppPath 'msedge.exe')"
             Write-Host "[INFO] Version: $version ($(Join-Path $systemAppPath $chromeBinPath.Name))"
+            Write-Host "[INFO] Profile path: $userDataFullPath\Default"
             
-            # Create shortcuts
-            Write-Host "[INFO] Creating shortcuts..."
+            # Create shortcuts with improved method
             $edgeExePath = Join-Path $systemAppPath "msedge.exe"
             $iconPath = Join-Path (Join-Path $systemAppPath $chromeBinPath.Name) "Edge_Icon.ico"
             
@@ -296,54 +299,75 @@ $visualElementsContent = @"
             }
             
             if (Test-Path $edgeExePath) {
-                # Create Desktop shortcut
-                $desktopPath = [Environment]::GetFolderPath("Desktop")
-                $desktopShortcut = Join-Path $desktopPath "$shortcutName.lnk"
+                Write-Host "[INFO] Creating shortcuts for $shortcutName..."
                 
-                # Create Start Menu shortcut
+                # Remove old shortcuts from ALL locations first
+                @(
+                    [Environment]::GetFolderPath("Desktop"),
+                    [Environment]::GetFolderPath("CommonDesktopDirectory"), 
+                    [Environment]::GetFolderPath("Programs"),
+                    [Environment]::GetFolderPath("CommonPrograms")
+                ) | ForEach-Object {
+                    if (Test-Path $_) {
+                        Get-ChildItem "$_\$shortcutName.lnk" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                        # Also remove potential variations
+                        Get-ChildItem "$_\*Edge*.lnk" -ErrorAction SilentlyContinue | Where-Object { 
+                            $_.Name -like "*$channelName*" -or $_.Name -eq "$shortcutName.lnk"
+                        } | Remove-Item -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                
+                # Create shortcuts arguments
+                $edgeArgs = "--user-data-dir=`"$userDataFullPath`" --disable-features=msCopilotMode2"
+                
+                # Create Start Menu folder path
                 $startMenuPath = Join-Path ([Environment]::GetFolderPath("CommonPrograms")) "Microsoft"
                 if (-not (Test-Path $startMenuPath)) {
                     New-Item -ItemType Directory -Path $startMenuPath -Force | Out-Null
                 }
-                $startMenuShortcut = Join-Path $startMenuPath "$shortcutName.lnk"
                 
-			# Remove existing shortcuts if they exist (to ensure overwrite)
-			if (Test-Path $desktopShortcut) {
-				Remove-Item $desktopShortcut -Force -ErrorAction SilentlyContinue
-				Write-Host "[INFO] Removed existing desktop shortcut"
-			}
-			if (Test-Path $startMenuShortcut) {
-				Remove-Item $startMenuShortcut -Force -ErrorAction SilentlyContinue  
-				Write-Host "[INFO] Removed existing start menu shortcut"
-			}
-
-                # Create shortcuts using WScript.Shell
-                $shell = New-Object -ComObject WScript.Shell
-                
-                try {
-                    # Desktop shortcut
-                    $desktopLink = $shell.CreateShortcut($desktopShortcut)
-                    $desktopLink.TargetPath = $edgeExePath
-                    $desktopLink.WorkingDirectory = $systemAppPath
-                    $desktopLink.Description = $shortcutName
-                    $desktopLink.IconLocation = "$iconPath,0"
-                    $desktopLink.Save()
-                    Write-Host "[INFO] Desktop shortcut created: $desktopShortcut"
+				# Create new shortcuts using improved method
+                $shortcutPaths = @([Environment]::GetFolderPath("Desktop"), $startMenuPath)
+                foreach ($shortcutPath in $shortcutPaths) {
+                    $WshShell = New-Object -ComObject WScript.Shell
+                    $temp = "$shortcutPath\temp_edge_shortcut.lnk"
+                    $final = "$shortcutPath\$shortcutName.lnk"
                     
-                    # Start Menu shortcut  
-                    $startMenuLink = $shell.CreateShortcut($startMenuShortcut)
-                    $startMenuLink.TargetPath = $edgeExePath
-                    $startMenuLink.WorkingDirectory = $systemAppPath
-                    $startMenuLink.Description = $shortcutName
-                    $startMenuLink.IconLocation = "$iconPath,0"
-                    $startMenuLink.Save()
-                    Write-Host "[INFO] Start Menu shortcut created: $startMenuShortcut"
-                    
-                } catch {
-                    Write-Host "[WARNING] Failed to create shortcuts: $($_.Exception.Message)"
-                } finally {
-                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
+                    try {
+                        $shortcut = $WshShell.CreateShortcut($temp)
+                        $shortcut.TargetPath = $edgeExePath
+                        $shortcut.Arguments = $edgeArgs
+                        $shortcut.WorkingDirectory = $systemAppPath
+                        $shortcut.Description = $shortcutName
+                        $shortcut.IconLocation = "$iconPath,0"
+                        $shortcut.Save()
+                        
+                        # Rename temp to final name
+                        if (Test-Path $temp) {
+                            if (Test-Path $final) {
+                                Remove-Item $final -Force -ErrorAction SilentlyContinue
+                            }
+                            Rename-Item $temp $final -ErrorAction SilentlyContinue
+                            
+                            if (Test-Path $final) {
+                                $location = if ($shortcutPath -like "*Desktop*") { "Desktop" } else { "Start Menu" }
+                                Write-Host "[INFO] $location shortcut created: $final"
+                            }
+                        }
+                        
+                        # Remove temp file if still exists
+                        Remove-Item $temp -ErrorAction SilentlyContinue
+                        
+                    } catch {
+                        Write-Host "[WARNING] Failed to create shortcut at $shortcutPath`: $($_.Exception.Message)"
+                        Remove-Item $temp -ErrorAction SilentlyContinue
+                    } finally {
+                        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($WshShell) | Out-Null
+                    }
                 }
+                
+                Write-Host "[INFO] Shortcut arguments: $edgeArgs"
+                
             } else {
                 Write-Host "[WARNING] msedge.exe not found, shortcuts not created"
             }
@@ -371,10 +395,6 @@ Get-ScheduledTask -TaskName "MicrosoftEdgeUpdate*" -ErrorAction SilentlyContinue
 }
 Remove-Item "${env:ProgramFiles(x86)}\Microsoft\EdgeUpdate" -Recurse -Force -ErrorAction SilentlyContinue
 
-# Create temp folder
-$tempDir = "$env:USERPROFILE\Downloads\microsoft-edge-multi-debloater"
-if (-not (Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory | Out-Null }
-
 # Apply registry tweaks
 $regUrl="https://raw.githubusercontent.com/bibicadotnet/microsoft-edge-debloater/refs/heads/main/vi.edge.reg"
 $regFile="$tempDir\debloat.reg"
@@ -382,22 +402,22 @@ $wc=New-Object Net.WebClient
 try{$wc.DownloadFile($regUrl,$regFile)}finally{$wc.Dispose()}
 Start-Process regedit "/s `"$regFile`"" -Wait -NoNewWindow
 
-# Cleanup
-Write-Host "[INFO] Cleaning up temporary files..."
-Remove-Item $tempExtractFolder -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $finalExtractFolder -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $outputPath -Force -ErrorAction SilentlyContinue
-$wc.Dispose()
-
 # Clean up
-#Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "`nMicrosoft Edge Browser installation completed!" -ForegroundColor Green
-Write-Host "`nAutomatic updates are completely disabled." -ForegroundColor Yellow
-Write-Host "Recommendation: Restart your computer to apply all changes." -ForegroundColor Yellow
+# === Installation Summary ===
+Write-Host ""
+Write-Host "=== Installation Summary ==="
+Write-Host "Channel: $channelName"
+Write-Host "Version: $version"
+Write-Host "Installation Path: $systemPath"
+Write-Host "Profile Path: $userDataFullPath\Default"
+Write-Host "Shortcut Arguments: --user-data-dir=`"$userDataFullPath`" --disable-features=msCopilotMode2"
+
+$wc.Dispose()
 
 Write-Host "`nNOTICE: To update Microsoft Edge when needed, please:" -ForegroundColor Cyan -BackgroundColor DarkGreen
 Write-Host "1. Open PowerShell with Administrator privileges" -ForegroundColor White
-Write-Host "2. Run the following command: irm https://go.bibica.net/edge_disable_update | iex" -ForegroundColor Yellow
+Write-Host "2. Run the following command: irm https://go.bibica.net/edge_multi | iex" -ForegroundColor Yellow
 Write-Host "3. Wait for the installation process to complete" -ForegroundColor White
 Write-Host
